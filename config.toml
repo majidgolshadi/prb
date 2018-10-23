@@ -1,0 +1,19 @@
+debug_port=":8080"
+network_interface="enp2s0"
+analyzing_buffer_size=10000
+dump_dir="/home/majidgolshadi/dumps"
+redis_add="127.0.0.1:6379"
+report_duration=5
+
+# Rightel machine ips
+#active_node_ip="10.200.29.6,10.200.29.7,10.200.29.8,10.200.29.9,10.200.29.10,10.200.29.11,10.200.29.12,10.200.29.13"
+
+# MTN machine ips
+#active_node_ip="10.220.126.6,10.220.126.7,10.220.126.8,10.220.126.9,10.220.126.10,10.220.126.11,10.220.126.12,10.220.126.13"
+
+# MCI machine ips
+active_node_ip="10.10.15.6,10.10.15.7,10.10.15.8,10.10.15.9,10.10.15.10,10.10.15.11,10.10.15.12,10.10.15.13"
+
+[log]
+format="text"
+log_level="info"
