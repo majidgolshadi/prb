@@ -15,7 +15,7 @@ func (tcpdump *Tcpdump) DumpNetworkInterfaceTrafficOn(NetworkInterface string, e
 		tcpdump.FileSize = "10mb"
 	}
 
-	_,err := exec.Command("tcpdump", "-i", NetworkInterface, "-B", "32768", "-C", tcpdump.FileSize, "-w", endpointDir+"/dump.pcap").CombinedOutput()
+	_, err := exec.Command("tcpdump", "-i", NetworkInterface, "-B", "32768", "-C", tcpdump.FileSize, "-w", endpointDir+"/dump.pcap").CombinedOutput()
 	if err != nil {
 		//log.Fatal("tcpdump error: ", err.Error())
 	}

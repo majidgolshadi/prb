@@ -2,8 +2,7 @@ package traffic_analyzer
 
 import (
 	"encoding/json"
-	"github.com/go-redis/redis"
-	redigo "github.com/gomodule/redigo/redis"
+	"github.com/patrickmn/go-cache"
 	log "github.com/sirupsen/logrus"
 	"strconv"
 	"strings"
@@ -12,19 +11,22 @@ import (
 
 type reportMaker struct {
 	Statistics      map[string]*Report
-	report      map[string]*Report
+	report          map[string]*Report
 	calculationFlag bool
 
-	redigoRedisConn redigo.Conn
-	redisClient     *redis.Client
+	mainCache *cache.Cache
+	missCache *cache.Cache
 
 	reportTicker *time.Ticker
 	opt          *ReportMakerOption
 }
 
 type ReportMakerOption struct {
-	RedisAdd  string
-	ReportSec time.Duration
+	ReportSec         time.Duration
+	ReqTtlSec         time.Duration
+	ReqCleanupSec     time.Duration
+	MissTtlSec        time.Duration
+	MissTtlCleanupSec time.Duration
 }
 
 type Report struct {
@@ -46,23 +48,17 @@ type PacketInfo struct {
 
 const TOTAL = "total"
 
-func NewReportMaker(option *ReportMakerOption) *reportMaker {
-	rc, err := redigo.Dial("tcp", option.RedisAdd)
-	if err != nil {
-		log.Error("make reporter error: ", err.Error())
-		return nil
-	}
+func NewReportMaker(opt *ReportMakerOption) *reportMaker {
+
+	mainCache := cache.New(opt.ReqTtlSec*time.Second, opt.ReqCleanupSec*time.Second)
+	missCache := cache.New(opt.MissTtlSec*time.Second, opt.MissTtlCleanupSec*time.Second)
 
 	rm := &reportMaker{
-		Statistics:      make(map[string]*Report),
-		report:      make(map[string]*Report),
-		redigoRedisConn: rc,
-		redisClient: redis.NewClient(&redis.Options{
-			Addr:     option.RedisAdd,
-			Password: "",
-			DB:       0,
-		}),
-		opt: option,
+		Statistics: make(map[string]*Report),
+		report:     make(map[string]*Report),
+		mainCache:  mainCache,
+		missCache:  missCache,
+		opt:        opt,
 	}
 
 	rm.Statistics[TOTAL] = &Report{
@@ -70,6 +66,19 @@ func NewReportMaker(option *ReportMakerOption) *reportMaker {
 	}
 
 	return rm
+}
+
+func (rm *reportMaker) onMainCacheEvicted(key string, value interface{}) {
+	_, exist := rm.missCache.Get(key)
+	if exist {
+		rm.missCache.Delete(key)
+		return
+	}
+
+	rm.Statistics[TOTAL].NotRes++
+	rm.Statistics[getTypeFromKey(key)].Res++
+
+	rm.missCache.Set(key, value, cache.DefaultExpiration)
 }
 
 func (rm *reportMaker) Register(key string) {
@@ -81,59 +90,39 @@ func (rm *reportMaker) Register(key string) {
 }
 
 func (rm *reportMaker) Listen(analyzedPacket chan *PacketInfo) {
-	// Activate redis event on key TTL arrived
-	rm.redisClient.ConfigSet("notify-keyspace-events", "KEA")
 	go rm.makeReportOnTime()
-	go rm.listenOnExpiredKeys()
+	rm.mainCache.OnEvicted(rm.onMainCacheEvicted)
 
 	for packet := range analyzedPacket {
 		if packet.IsRequest {
 			rm.Statistics[TOTAL].Req++
 			rm.Statistics[packet.Type].Req++
-
-			rm.redisClient.Set(makeRedisKey(packet.Type, packet.Key), packet.PacketTime, 2*time.Second)
-			continue
+		} else {
+			rm.Statistics[TOTAL].Res++
+			rm.Statistics[packet.Type].Res++
 		}
 
 		go func(packet *PacketInfo) {
-			result, _ := rm.redisClient.Get(makeRedisKey(packet.Type, packet.Key)).Result()
-			if result == "" {
-				rm.Statistics[TOTAL].MissReq++
-				rm.Statistics[packet.Type].MissReq++
+			result, exist := rm.mainCache.Get(makeKey(packet.Type, packet.Key))
+			if !exist {
+				rm.mainCache.Set(makeKey(packet.Type, packet.Key), packet.PacketTime, cache.DefaultExpiration)
 				return
 			}
 
-			rm.Statistics[TOTAL].Res++
-			rm.Statistics[packet.Type].Res++
-
-			rm.redisClient.Del(makeRedisKey(packet.Type, packet.Key))
-			reqTime, _ := strconv.ParseFloat(result, 64)
+			rm.mainCache.Delete(makeKey(packet.Type, packet.Key))
+			reqTime, _ := strconv.ParseFloat(result.(string), 64)
 			rm.calculateResponseTime(reqTime, packet)
 		}(packet)
 	}
 
 }
 
-func (rm *reportMaker) listenOnExpiredKeys() {
-	psc := redigo.PubSubConn{Conn: rm.redigoRedisConn}
-	psc.PSubscribe("__keyevent@*__:expired")
-	for {
-		switch msg := psc.Receive().(type) {
-		case redigo.Message:
-			if strings.Contains(string(msg.Data), "dia") {
-				rm.Statistics["dia"].NotRes++
-			} else {
-				rm.Statistics["gsm_map"].NotRes++
-			}
-			rm.Statistics[TOTAL].NotRes++
-		case error:
-			log.Error("report maker event error: ", msg)
-		}
-	}
+func makeKey(packetType string, key string) string {
+	return packetType + "_" + key
 }
 
-func makeRedisKey(packetType string, key string) string {
-	return packetType + "_" + key
+func getTypeFromKey(key string) string {
+	return strings.Split(key, "_")[0]
 }
 
 func (rm *reportMaker) makeReportOnTime() {
@@ -171,7 +160,4 @@ func (rm *reportMaker) Close() {
 	log.Warn("report maker stop")
 
 	rm.reportTicker.Stop()
-
-	rm.redisClient.Close()
-	rm.redigoRedisConn.Close()
 }
